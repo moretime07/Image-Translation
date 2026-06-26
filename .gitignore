@@ -1,0 +1,29 @@
+# Local secrets and machine-specific config
+settings.json
+settings.local.json
+.env
+.env.*
+!.env.example
+
+# Runtime input/output data
+素材/
+已完成/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build outputs
+build/
+dist/
+*.exe
+
+# Logs and OS metadata
+*.log
+desktop.ini
+Thumbs.db
+.DS_Store
