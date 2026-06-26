@@ -409,6 +409,30 @@ class WindowLayoutTests(unittest.TestCase):
         finally:
             app.root.destroy()
 
+    def test_log_selection_uses_contrasting_theme_text(self):
+        import generate_custom_bat
+
+        class FakeText:
+            def __init__(self):
+                self.options = {}
+
+            def configure(self, **kwargs):
+                self.options.update(kwargs)
+
+        for theme_id, theme_spec in generate_custom_bat.THEME_PRESETS.items():
+            with self.subTest(theme_id=theme_id):
+                widget = FakeText()
+                theme = generate_custom_bat.set_app_theme(theme_id)
+                generate_custom_bat.configure_log_widget(widget)
+
+                self.assertEqual(widget.options["selectbackground"], theme["primary"])
+                self.assertEqual(widget.options["selectforeground"], theme["primary_text"])
+                self.assertNotEqual(
+                    widget.options["selectforeground"],
+                    widget.options["selectbackground"],
+                )
+                self.assertEqual(theme["primary_text"], theme_spec["colors"]["primary_text"])
+
     def test_theme_switcher_has_five_presets_and_applies_selected_theme(self):
         import generate_custom_bat
 

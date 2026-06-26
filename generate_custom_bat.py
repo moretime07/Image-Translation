@@ -388,7 +388,7 @@ def configure_log_widget(log_widget):
         foreground=APP_THEME["text"],
         insertbackground=APP_THEME["primary_hover"],
         selectbackground=APP_THEME["primary"],
-        selectforeground=APP_THEME["text"],
+        selectforeground=APP_THEME["primary_text"],
         relief="flat",
         borderwidth=0,
         highlightthickness=0,
