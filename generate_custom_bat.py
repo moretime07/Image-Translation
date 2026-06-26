@@ -147,6 +147,10 @@ THEME_LABEL_TO_ID = {
     spec["label"]: theme_id
     for theme_id, spec in THEME_PRESETS.items()
 }
+OVERWRITE_POLICY_LABEL_TO_ID = {
+    label: policy_id
+    for policy_id, label in translator.OVERWRITE_POLICIES.items()
+}
 APP_THEME = THEME_PRESETS[DEFAULT_THEME_ID]["colors"]
 
 
@@ -164,6 +168,18 @@ def theme_label(theme_id):
 
 def theme_id_for_label(label):
     return THEME_LABEL_TO_ID.get(label, DEFAULT_THEME_ID)
+
+
+def overwrite_policy_label(policy_id):
+    normalized = translator.normalize_overwrite_policy(policy_id)
+    return translator.OVERWRITE_POLICIES[normalized]
+
+
+def overwrite_policy_id_for_label(label):
+    return OVERWRITE_POLICY_LABEL_TO_ID.get(
+        label,
+        translator.DEFAULT_OVERWRITE_POLICY,
+    )
 
 
 def set_app_theme(theme_id):
@@ -861,15 +877,26 @@ class App:
         configure_root_window(self.root, self.theme_id.get())
 
         self.vars = {}
-        self.source_dir = tk.StringVar(value=str(translator.SOURCE_DIR))
-        self.output_dir = tk.StringVar(value=str(translator.OUTPUT_BASE_DIR / "custom_languages"))
-        self.output_format = tk.StringVar(value=translator.DEFAULT_OUTPUT_FORMAT)
+        self.initial_selected_codes = set(
+            translator.normalize_selected_languages(
+                saved_settings.get("selected_languages", DEFAULT_CODES)
+            )
+        )
+        overwrite_policy = translator.normalize_overwrite_policy(
+            saved_settings.get("overwrite_policy", "")
+        )
+        self.source_dir = tk.StringVar(value=saved_settings["source_dir"])
+        self.output_dir = tk.StringVar(value=saved_settings["output_dir"])
+        self.output_format = tk.StringVar(value=saved_settings["output_format"])
+        self.overwrite_policy = tk.StringVar(value=overwrite_policy)
+        self.overwrite_policy_label = tk.StringVar(value=overwrite_policy_label(overwrite_policy))
         self.api_url = tk.StringVar(value=saved_settings["api_url"])
         self.api_key = tk.StringVar(value=saved_settings["api_key"])
         self.model_id = tk.StringVar(value=saved_settings["model_id"])
         self.proxy_url = tk.StringVar(value=saved_settings["proxy_url"])
         self.log_queue = queue.Queue()
         self.worker = None
+        self.cancel_event = threading.Event()
         self.rounded_sections = []
         self.rounded_buttons = []
 
@@ -983,7 +1010,7 @@ class App:
             grid.columnconfigure(column, weight=1)
 
         for index, (code, label) in enumerate(LANGUAGES):
-            var = tk.BooleanVar(value=code in DEFAULT_CODES)
+            var = tk.BooleanVar(value=code in self.initial_selected_codes)
             self.vars[code] = var
             checkbox = ttk.Checkbutton(
                 grid,
@@ -1032,17 +1059,59 @@ class App:
                 style="App.TRadiobutton",
             ).grid(row=0, column=index, sticky="w", padx=(0, 24), pady=2)
 
+        ttk.Label(format_frame, text="覆盖策略", style="Panel.TLabel").grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=(10, 0),
+        )
+        overwrite_combo = ttk.Combobox(
+            format_frame,
+            textvariable=self.overwrite_policy_label,
+            values=tuple(translator.OVERWRITE_POLICIES.values()),
+            state="readonly",
+            style="App.TCombobox",
+        )
+        self.overwrite_combo = overwrite_combo
+        overwrite_combo.grid(
+            row=1,
+            column=1,
+            columnspan=max(len(translator.OUTPUT_FORMATS) - 1, 1),
+            sticky="ew",
+            padx=(10, 0),
+            pady=(10, 0),
+        )
+        overwrite_combo.bind("<<ComboboxSelected>>", self.on_overwrite_policy_selected)
+        configure_combobox_popdown(overwrite_combo)
+
         button_row = ttk.Frame(frame, style="App.TFrame")
         button_row.pack(fill="x", pady=(4, 8))
+        button_row.columnconfigure(0, weight=1)
+        button_row.columnconfigure(1, weight=1)
 
         self.start_button = self.create_button(
             button_row,
             text="开始翻译",
             command=self.start_translation,
             variant="primary",
-            manager="pack",
-            fill="x",
+            manager="grid",
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=(0, 6),
         )
+        self.cancel_button = self.create_button(
+            button_row,
+            text="取消任务",
+            command=self.cancel_translation,
+            variant="subtle",
+            manager="grid",
+            row=0,
+            column=1,
+            sticky="ew",
+            padx=(6, 0),
+        )
+        self.cancel_button.configure(state="disabled")
         self.create_button(
             frame,
             text="清空选择",
@@ -1099,11 +1168,18 @@ class App:
             button.apply_theme()
         if hasattr(self, "theme_combo"):
             configure_combobox_popdown(self.theme_combo)
+        if hasattr(self, "overwrite_combo"):
+            configure_combobox_popdown(self.overwrite_combo)
         if hasattr(self, "log"):
             configure_log_widget(self.log)
 
     def on_theme_selected(self, _event=None):
         self.apply_theme(theme_id_for_label(self.theme_label.get()))
+
+    def on_overwrite_policy_selected(self, _event=None):
+        policy_id = overwrite_policy_id_for_label(self.overwrite_policy_label.get())
+        self.overwrite_policy.set(policy_id)
+        self.overwrite_policy_label.set(overwrite_policy_label(policy_id))
 
     def current_settings(self):
         return {
@@ -1112,6 +1188,11 @@ class App:
             "model_id": self.model_id.get(),
             "proxy_url": self.proxy_url.get(),
             "theme_id": self.theme_id.get(),
+            "source_dir": self.source_dir.get(),
+            "output_dir": self.output_dir.get(),
+            "output_format": self.output_format.get(),
+            "selected_languages": self.selected_codes() if self.vars else list(DEFAULT_CODES),
+            "overwrite_policy": self.overwrite_policy.get(),
         }
 
     def save_settings(self, show_message=True):
@@ -1126,9 +1207,14 @@ class App:
         self.api_key.set(saved["api_key"])
         self.model_id.set(saved["model_id"])
         self.proxy_url.set(saved["proxy_url"])
+        self.source_dir.set(saved["source_dir"])
+        self.output_dir.set(saved["output_dir"])
+        self.output_format.set(saved["output_format"])
+        self.overwrite_policy.set(saved["overwrite_policy"])
+        self.overwrite_policy_label.set(overwrite_policy_label(saved["overwrite_policy"]))
         self.apply_theme(saved.get("theme_id", DEFAULT_THEME_ID))
         if show_message:
-            messagebox.showinfo("已保存", "API 设置已保存。")
+            messagebox.showinfo("已保存", "设置已保存。")
         return saved
 
     def check_settings(self):
@@ -1166,8 +1252,11 @@ class App:
                 if isinstance(item, tuple) and item[0] == "__done__":
                     exit_code = item[1]
                     self.start_button.configure(state="normal")
+                    self.cancel_button.configure(state="disabled")
                     if exit_code == 0:
                         messagebox.showinfo("完成", "翻译任务已完成。")
+                    elif exit_code == translator.CANCELLED_EXIT_CODE:
+                        messagebox.showinfo("已取消", "翻译任务已取消。")
                     else:
                         messagebox.showwarning("结束", "翻译任务已结束，但有失败项，请查看日志。")
                 else:
@@ -1175,6 +1264,14 @@ class App:
         except queue.Empty:
             pass
         self.root.after(150, self.flush_logs)
+
+    def cancel_translation(self):
+        if self.worker and self.worker.is_alive():
+            self.cancel_event.set()
+            self.cancel_button.configure(state="disabled")
+            self.append_log("正在取消任务，已提交的请求会等待当前响应结束。")
+        else:
+            messagebox.showinfo("提示", "当前没有正在运行的翻译任务。")
 
     def start_translation(self):
         codes = self.selected_codes()
@@ -1186,6 +1283,7 @@ class App:
         if settings is None:
             return
         settings["output_format"] = self.output_format.get()
+        settings["overwrite_policy"] = self.overwrite_policy.get()
 
         source_dir = self.source_dir.get().strip()
         output_dir = self.output_dir.get().strip()
@@ -1203,19 +1301,26 @@ class App:
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
+        self.cancel_event.clear()
         self.start_button.configure(state="disabled")
+        self.cancel_button.configure(state="normal")
 
         def logger(message):
             self.log_queue.put(message)
 
         def worker():
-            exit_code = translator.run_translation(
-                tuple(codes),
-                logger=logger,
-                settings=settings,
-                source_dir=source_dir,
-                output_dir=output_dir,
-            )
+            try:
+                exit_code = translator.run_translation(
+                    tuple(codes),
+                    logger=logger,
+                    settings=settings,
+                    source_dir=source_dir,
+                    output_dir=output_dir,
+                    cancel_event=self.cancel_event,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger(f"任务异常: {type(exc).__name__}: {exc}")
+                exit_code = 1
             self.log_queue.put(("__done__", exit_code))
 
         self.worker = threading.Thread(target=worker, daemon=True)

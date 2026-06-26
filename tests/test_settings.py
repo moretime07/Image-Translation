@@ -1,8 +1,11 @@
 import json
 import os
 import base64
+import io
 import sys
 import tempfile
+import threading
+import urllib.error
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -65,6 +68,16 @@ class FakeOpener:
         return FakeResponse(self.body)
 
 
+class RaisingOpener:
+    def __init__(self, exc):
+        self.exc = exc
+        self.requests = []
+
+    def open(self, request, timeout=0):
+        self.requests.append((request, timeout))
+        raise self.exc
+
+
 class SettingsTests(unittest.TestCase):
     def test_save_and_load_settings_round_trip(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -80,7 +93,7 @@ class SettingsTests(unittest.TestCase):
             translator.save_settings(settings, settings_path)
             loaded = translator.load_settings(settings_path)
 
-        self.assertEqual(loaded, settings)
+        self.assertEqual(loaded, translator.normalize_settings(settings))
 
     def test_load_settings_merges_saved_values_with_defaults(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -98,6 +111,31 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(loaded["model_id"], translator.DEFAULT_MODEL_ID)
         self.assertEqual(loaded["proxy_url"], "")
         self.assertEqual(loaded["theme_id"], translator.DEFAULT_THEME_ID)
+
+    def test_save_and_load_settings_keeps_ui_preferences(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            settings = {
+                "api_url": "https://api.example.test/v1/chat/completions",
+                "api_key": "test-key",
+                "model_id": "custom/image-model",
+                "proxy_url": "http://127.0.0.1:7890",
+                "theme_id": "scheme_3",
+                "source_dir": "D:/input",
+                "output_dir": "D:/output",
+                "output_format": "webp",
+                "selected_languages": ["ja", "ko"],
+                "overwrite_policy": "rename",
+            }
+
+            translator.save_settings(settings, settings_path)
+            loaded = translator.load_settings(settings_path)
+
+        self.assertEqual(loaded["source_dir"], "D:/input")
+        self.assertEqual(loaded["output_dir"], "D:/output")
+        self.assertEqual(loaded["output_format"], "webp")
+        self.assertEqual(loaded["selected_languages"], ["ja", "ko"])
+        self.assertEqual(loaded["overwrite_policy"], "rename")
 
     def test_validate_settings_reports_missing_or_invalid_fields(self):
         errors = translator.validate_settings(
@@ -259,6 +297,82 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertIn("接口返回不是 JSON", result["error"])
         self.assertIn("https://api.example.test/v1/chat/completions", result["error"])
+
+    def test_translate_image_reports_actionable_401_error(self):
+        http_error = urllib.error.HTTPError(
+            "https://api.example.test/v1/chat/completions",
+            401,
+            "Unauthorized",
+            {},
+            io.BytesIO(b'{"error":"invalid api key"}'),
+        )
+        fake_opener = RaisingOpener(http_error)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_path = temp_path / "input.png"
+            output_path = temp_path / "output.png"
+            input_path.write_bytes(PNG_BYTES)
+
+            settings = {
+                "api_url": "https://api.example.test/v1/",
+                "api_key": "bad-key",
+                "model_id": "configured-model",
+                "proxy_url": "",
+                "output_format": "png",
+            }
+
+            with patch.object(
+                translator, "build_openers", return_value=[(fake_opener, "direct")]
+            ):
+                result = translator.translate_image(
+                    input_path,
+                    output_path,
+                    {"prompt": "translate this", "folder": "English"},
+                    settings,
+                )
+
+        self.assertFalse(result["success"])
+        self.assertIn("HTTP 401", result["error"])
+        self.assertIn("API Key", result["error"])
+
+    def test_translate_image_reports_actionable_429_error(self):
+        http_error = urllib.error.HTTPError(
+            "https://api.example.test/v1/chat/completions",
+            429,
+            "Too Many Requests",
+            {},
+            io.BytesIO(b'{"error":"rate limit"}'),
+        )
+        fake_opener = RaisingOpener(http_error)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_path = temp_path / "input.png"
+            output_path = temp_path / "output.png"
+            input_path.write_bytes(PNG_BYTES)
+
+            settings = {
+                "api_url": "https://api.example.test/v1/",
+                "api_key": "configured-key",
+                "model_id": "configured-model",
+                "proxy_url": "",
+                "output_format": "png",
+            }
+
+            with patch.object(
+                translator, "build_openers", return_value=[(fake_opener, "direct")]
+            ):
+                result = translator.translate_image(
+                    input_path,
+                    output_path,
+                    {"prompt": "translate this", "folder": "English"},
+                    settings,
+                )
+
+        self.assertFalse(result["success"])
+        self.assertIn("HTTP 429", result["error"])
+        self.assertIn("降低并发", result["error"])
 
     def test_translate_image_converts_response_to_configured_output_format(self):
         response = {
@@ -661,6 +775,63 @@ class WindowLayoutTests(unittest.TestCase):
 
         self.assertIn("选择模型", button_texts)
 
+    def test_cancel_button_and_overwrite_policy_controls_are_rendered(self):
+        import generate_custom_bat
+        from tkinter import ttk
+
+        button_types = (ttk.Button, generate_custom_bat.RoundedButton)
+
+        def collect_widgets(widget, widget_type):
+            items = []
+            for child in widget.winfo_children():
+                if isinstance(child, widget_type):
+                    items.append(child)
+                items.extend(collect_widgets(child, widget_type))
+            return items
+
+        app = generate_custom_bat.App()
+        app.root.withdraw()
+        try:
+            button_texts = [button.cget("text") for button in collect_widgets(app.root, button_types)]
+            combo_values = [
+                tuple(combo.cget("values"))
+                for combo in collect_widgets(app.root, ttk.Combobox)
+            ]
+        finally:
+            app.root.destroy()
+
+        self.assertIn("取消任务", button_texts)
+        self.assertIn(
+            ("覆盖已有文件", "跳过已有文件", "自动重命名"),
+            combo_values,
+        )
+
+    def test_app_loads_saved_directory_and_output_preferences(self):
+        import generate_custom_bat
+
+        saved = generate_custom_bat.translator.default_settings()
+        saved.update(
+            {
+                "source_dir": "D:/input-images",
+                "output_dir": "D:/translated-images",
+                "output_format": "webp",
+                "selected_languages": ["ja", "ko"],
+                "overwrite_policy": "skip",
+            }
+        )
+
+        with patch.object(generate_custom_bat.translator, "load_settings", return_value=saved):
+            app = generate_custom_bat.App()
+        app.root.withdraw()
+        try:
+            self.assertEqual(app.source_dir.get(), "D:/input-images")
+            self.assertEqual(app.output_dir.get(), "D:/translated-images")
+            self.assertEqual(app.output_format.get(), "webp")
+            self.assertEqual(app.overwrite_policy.get(), "skip")
+            self.assertEqual(app.selected_codes(), ["ja", "ko"])
+        finally:
+            app.root.destroy()
+
     def test_root_window_is_resizable_with_minimum_size(self):
         import generate_custom_bat
 
@@ -819,6 +990,154 @@ class DirectorySelectionTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual([path.name for path in seen_output_paths], ["poster.jpeg"])
+
+    def test_run_translation_skips_existing_outputs_when_policy_is_skip(self):
+        seen_output_paths = []
+        logs = []
+
+        def fake_translate(image_path, output_path, lang_config, settings):
+            seen_output_paths.append(output_path)
+            output_path.write_bytes(PNG_BYTES)
+            return {
+                "success": True,
+                "input": image_path.name,
+                "output": output_path.name,
+                "time_ms": 0,
+                "error": None,
+                "language": lang_config["folder"],
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_dir = temp_path / "source"
+            output_dir = temp_path / "output"
+            source_dir.mkdir()
+            (source_dir / "poster.png").write_bytes(PNG_BYTES)
+            language_dir = output_dir / translator.LANGUAGE_SPECS["en"]["folder"]
+            language_dir.mkdir(parents=True)
+            existing_output = language_dir / "poster.png"
+            existing_output.write_bytes(b"existing")
+
+            settings = {
+                "api_url": "https://api.example.test/v1/chat/completions",
+                "api_key": "test-key",
+                "model_id": "test-model",
+                "proxy_url": "",
+                "output_format": "png",
+                "overwrite_policy": "skip",
+            }
+
+            with patch.object(translator, "translate_image", side_effect=fake_translate):
+                with patch.object(translator, "can_connect_to_proxy", return_value=False):
+                    exit_code = translator.run_translation(
+                        ("en",),
+                        logger=logs.append,
+                        settings=settings,
+                        source_dir=source_dir,
+                        output_dir=output_dir,
+                    )
+            existing_bytes = existing_output.read_bytes()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(seen_output_paths, [])
+        self.assertEqual(existing_bytes, b"existing")
+        self.assertTrue(any("跳过" in line for line in logs))
+
+    def test_run_translation_auto_renames_existing_outputs_when_policy_is_rename(self):
+        seen_output_paths = []
+
+        def fake_translate(image_path, output_path, lang_config, settings):
+            seen_output_paths.append(output_path)
+            output_path.write_bytes(PNG_BYTES)
+            return {
+                "success": True,
+                "input": image_path.name,
+                "output": output_path.name,
+                "time_ms": 0,
+                "error": None,
+                "language": lang_config["folder"],
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_dir = temp_path / "source"
+            output_dir = temp_path / "output"
+            source_dir.mkdir()
+            (source_dir / "poster.png").write_bytes(PNG_BYTES)
+            language_dir = output_dir / translator.LANGUAGE_SPECS["en"]["folder"]
+            language_dir.mkdir(parents=True)
+            (language_dir / "poster.jpeg").write_bytes(b"existing")
+            (language_dir / "poster-1.jpeg").write_bytes(b"existing")
+
+            settings = {
+                "api_url": "https://api.example.test/v1/chat/completions",
+                "api_key": "test-key",
+                "model_id": "test-model",
+                "proxy_url": "",
+                "output_format": "jpeg",
+                "overwrite_policy": "rename",
+            }
+
+            with patch.object(translator, "translate_image", side_effect=fake_translate):
+                with patch.object(translator, "can_connect_to_proxy", return_value=False):
+                    exit_code = translator.run_translation(
+                        ("en",),
+                        logger=lambda _message: None,
+                        settings=settings,
+                        source_dir=source_dir,
+                        output_dir=output_dir,
+                    )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual([path.name for path in seen_output_paths], ["poster-2.jpeg"])
+
+    def test_run_translation_stops_submitting_work_after_cancel_event_is_set(self):
+        cancel_event = threading.Event()
+        seen_images = []
+
+        def fake_translate(image_path, output_path, lang_config, settings):
+            seen_images.append(image_path.name)
+            cancel_event.set()
+            output_path.write_bytes(PNG_BYTES)
+            return {
+                "success": True,
+                "input": image_path.name,
+                "output": output_path.name,
+                "time_ms": 0,
+                "error": None,
+                "language": lang_config["folder"],
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_dir = temp_path / "source"
+            output_dir = temp_path / "output"
+            source_dir.mkdir()
+            for index in range(3):
+                (source_dir / f"poster-{index}.png").write_bytes(PNG_BYTES)
+
+            settings = {
+                "api_url": "https://api.example.test/v1/chat/completions",
+                "api_key": "test-key",
+                "model_id": "test-model",
+                "proxy_url": "",
+                "output_format": "png",
+            }
+
+            with patch.object(translator, "MAX_CONCURRENT", 1):
+                with patch.object(translator, "translate_image", side_effect=fake_translate):
+                    with patch.object(translator, "can_connect_to_proxy", return_value=False):
+                        exit_code = translator.run_translation(
+                            ("en",),
+                            logger=lambda _message: None,
+                            settings=settings,
+                            source_dir=source_dir,
+                            output_dir=output_dir,
+                            cancel_event=cancel_event,
+                        )
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(seen_images, ["poster-0.png"])
 
 
 class ResponseExtractionTests(unittest.TestCase):

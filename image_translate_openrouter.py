@@ -29,6 +29,8 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 PROXY_URL = os.environ.get("OPENROUTER_PROXY_URL", "").strip()
 MAX_CONCURRENT = 4
 OUTPUT_SIZE = "1080x1080"
+DEFAULT_SELECTED_LANGUAGE_CODES = ("en",)
+CANCELLED_EXIT_CODE = 2
 
 def get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -51,6 +53,12 @@ OUTPUT_FORMATS = {
     "jpg": {"label": "JPG", "extension": ".jpg", "pil_format": "JPEG"},
     "jpeg": {"label": "JPEG", "extension": ".jpeg", "pil_format": "JPEG"},
 }
+DEFAULT_OVERWRITE_POLICY = "overwrite"
+OVERWRITE_POLICIES = {
+    "overwrite": "覆盖已有文件",
+    "skip": "跳过已有文件",
+    "rename": "自动重命名",
+}
 IMAGE_MAGIC_HEADERS = (
     b"\x89PNG\r\n\x1a\n",
     b"\xff\xd8\xff",
@@ -64,7 +72,18 @@ COMMON_PROXY_CANDIDATES = (
     "http://127.0.0.1:7897",
 )
 
-SETTING_KEYS = ("api_url", "api_key", "model_id", "proxy_url", "theme_id")
+SETTING_KEYS = (
+    "api_url",
+    "api_key",
+    "model_id",
+    "proxy_url",
+    "theme_id",
+    "source_dir",
+    "output_dir",
+    "output_format",
+    "selected_languages",
+    "overwrite_policy",
+)
 
 
 def default_settings() -> dict:
@@ -74,12 +93,38 @@ def default_settings() -> dict:
         "model_id": DEFAULT_MODEL_ID,
         "proxy_url": os.environ.get("OPENROUTER_PROXY_URL", "").strip(),
         "theme_id": DEFAULT_THEME_ID,
+        "source_dir": str(SOURCE_DIR),
+        "output_dir": str(OUTPUT_BASE_DIR / "custom_languages"),
+        "output_format": DEFAULT_OUTPUT_FORMAT,
+        "selected_languages": list(DEFAULT_SELECTED_LANGUAGE_CODES),
+        "overwrite_policy": DEFAULT_OVERWRITE_POLICY,
     }
 
 
 def normalize_output_format(value: str = "") -> str:
     output_format = str(value or DEFAULT_OUTPUT_FORMAT).strip().lower()
     return output_format if output_format in OUTPUT_FORMATS else DEFAULT_OUTPUT_FORMAT
+
+
+def normalize_overwrite_policy(value: str = "") -> str:
+    policy = str(value or DEFAULT_OVERWRITE_POLICY).strip().lower()
+    return policy if policy in OVERWRITE_POLICIES else DEFAULT_OVERWRITE_POLICY
+
+
+def normalize_selected_languages(value) -> list:
+    if isinstance(value, str):
+        raw_codes = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        raw_codes = value
+    else:
+        raw_codes = DEFAULT_SELECTED_LANGUAGE_CODES
+
+    selected = []
+    for raw_code in raw_codes:
+        code = str(raw_code).strip().lower()
+        if code in LANGUAGE_SPECS and code not in selected:
+            selected.append(code)
+    return selected or list(DEFAULT_SELECTED_LANGUAGE_CODES)
 
 
 def output_format_label(output_format: str) -> str:
@@ -91,23 +136,58 @@ def output_path_for_image(image_path: Path, output_dir: Path, output_format: str
     return output_dir / f"{image_path.stem}{extension}"
 
 
+def unique_output_path(output_path: Path, reserved_paths=None) -> Path:
+    reserved = {Path(path) for path in (reserved_paths or set())}
+    if not output_path.exists() and output_path not in reserved:
+        return output_path
+
+    for index in range(1, 10_000):
+        candidate = output_path.with_name(
+            f"{output_path.stem}-{index}{output_path.suffix}"
+        )
+        if not candidate.exists() and candidate not in reserved:
+            return candidate
+
+    raise RuntimeError(f"无法生成不重复的输出文件名: {output_path}")
+
+
+def resolve_output_path(output_path: Path, overwrite_policy: str, reserved_paths=None):
+    policy = normalize_overwrite_policy(overwrite_policy)
+    reserved = {Path(path) for path in (reserved_paths or set())}
+    if policy == "skip" and (output_path.exists() or output_path in reserved):
+        return None
+    if policy == "rename":
+        return unique_output_path(output_path, reserved)
+    return output_path
+
+
 def normalize_settings(raw_settings=None) -> dict:
     settings = default_settings()
     if isinstance(raw_settings, dict):
         for key in SETTING_KEYS:
             if key in raw_settings:
-                settings[key] = str(raw_settings.get(key, "")).strip()
+                settings[key] = raw_settings.get(key, "")
 
     if not settings["api_key"]:
         settings["api_key"] = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not settings["proxy_url"]:
         settings["proxy_url"] = os.environ.get("OPENROUTER_PROXY_URL", "").strip()
-    if not settings["api_url"]:
-        settings["api_url"] = DEFAULT_API_URL
-    if not settings["model_id"]:
-        settings["model_id"] = DEFAULT_MODEL_ID
-    if not settings["theme_id"]:
-        settings["theme_id"] = DEFAULT_THEME_ID
+    settings["api_url"] = str(settings.get("api_url", "")).strip() or DEFAULT_API_URL
+    settings["api_key"] = str(settings.get("api_key", "")).strip()
+    settings["model_id"] = str(settings.get("model_id", "")).strip() or DEFAULT_MODEL_ID
+    settings["proxy_url"] = str(settings.get("proxy_url", "")).strip()
+    settings["theme_id"] = str(settings.get("theme_id", "")).strip() or DEFAULT_THEME_ID
+    settings["source_dir"] = str(settings.get("source_dir", "")).strip() or str(SOURCE_DIR)
+    settings["output_dir"] = str(settings.get("output_dir", "")).strip() or str(
+        OUTPUT_BASE_DIR / "custom_languages"
+    )
+    settings["output_format"] = normalize_output_format(settings.get("output_format", ""))
+    settings["selected_languages"] = normalize_selected_languages(
+        settings.get("selected_languages")
+    )
+    settings["overwrite_policy"] = normalize_overwrite_policy(
+        settings.get("overwrite_policy", "")
+    )
     return settings
 
 
@@ -122,7 +202,7 @@ def load_settings(settings_path=SETTINGS_FILE) -> dict:
         if isinstance(data, dict):
             for key in SETTING_KEYS:
                 if key in data:
-                    settings[key] = str(data.get(key, "")).strip()
+                    settings[key] = data.get(key, "")
     return normalize_settings(settings)
 
 
@@ -281,6 +361,37 @@ def extract_available_models(result) -> list:
     return models
 
 
+def actionable_http_hint(status_code: int) -> str:
+    hints = {
+        400: "请求格式可能不被当前接口支持，请检查 API 地址、模型和图片格式。",
+        401: "API Key 无效或未授权，请检查 API 密钥。",
+        402: "账号余额或额度不足，请到服务商后台检查余额。",
+        403: "当前 API Key 没有权限访问该模型，或模型不可用。",
+        404: "API 地址或模型 ID 可能不正确。",
+        408: "请求超时，请稍后重试或降低图片数量。",
+        429: "请求过快或触发限流，请降低并发后重试。",
+        500: "服务商内部错误，请稍后重试。",
+        502: "服务商网关异常，请稍后重试。",
+        503: "服务商暂时不可用，请稍后重试。",
+        504: "服务商响应超时，请稍后重试。",
+    }
+    if status_code in hints:
+        return hints[status_code]
+    if 500 <= status_code <= 599:
+        return "服务商暂时异常，请稍后重试。"
+    return "请检查 API 地址、模型 ID、密钥和代理配置。"
+
+
+def format_http_error(status_code: int, route_name: str, body_or_reason: str = "") -> str:
+    preview = str(body_or_reason or "").strip()
+    if len(preview) > 200:
+        preview = preview[:200]
+    hint = actionable_http_hint(status_code)
+    if preview:
+        return f"HTTP {status_code} via {route_name}: {hint} 原始响应: {preview}"
+    return f"HTTP {status_code} via {route_name}: {hint}"
+
+
 def fetch_available_models(settings: dict) -> list:
     runtime_settings = normalize_settings(settings)
     errors = validate_model_fetch_settings(runtime_settings)
@@ -299,7 +410,7 @@ def fetch_available_models(settings: dict) -> list:
             with opener.open(request, timeout=60) as response:
                 body = response.read().decode("utf-8", errors="replace")
                 if response.status != 200:
-                    last_error = f"HTTP {response.status} via {route_name}: {body[:200]}"
+                    last_error = format_http_error(response.status, route_name, body)
                     continue
 
             models = extract_available_models(json.loads(body))
@@ -311,7 +422,7 @@ def fetch_available_models(settings: dict) -> list:
                 body = exc.read().decode("utf-8", errors="replace")
             except Exception:
                 body = ""
-            last_error = f"HTTP {exc.code} via {route_name}: {body[:200] or exc.reason}"
+            last_error = format_http_error(exc.code, route_name, body or exc.reason)
         except urllib.error.URLError as exc:
             last_error = f"URL Error via {route_name}: {exc.reason}"
         except (ValueError, json.JSONDecodeError) as exc:
@@ -375,6 +486,11 @@ def parse_args():
         "--output-format",
         choices=tuple(OUTPUT_FORMATS.keys()),
         default=DEFAULT_OUTPUT_FORMAT,
+    )
+    parser.add_argument(
+        "--overwrite-policy",
+        choices=tuple(OVERWRITE_POLICIES.keys()),
+        default=DEFAULT_OVERWRITE_POLICY,
     )
     parser.add_argument("--api-url", default="")
     parser.add_argument("--api-key", default="")
@@ -728,7 +844,7 @@ def translate_image(
             with opener.open(request, timeout=180) as response:
                 body = response.read().decode("utf-8")
                 if response.status != 200:
-                    last_error = f"HTTP {response.status} via {route_name}: {body[:200]}"
+                    last_error = format_http_error(response.status, route_name, body)
                     continue
 
             try:
@@ -755,7 +871,7 @@ def translate_image(
                 body = exc.read().decode("utf-8", errors="replace")
             except Exception:
                 body = ""
-            last_error = f"HTTP {exc.code} via {route_name}: {body[:200] or exc.reason}"
+            last_error = format_http_error(exc.code, route_name, body or exc.reason)
         except urllib.error.URLError as exc:
             last_error = f"URL Error via {route_name}: {exc.reason}"
         except Exception as exc:  # noqa: BLE001
@@ -789,10 +905,11 @@ def run_translation(
     settings: dict = None,
     source_dir: Path = None,
     output_dir: Path = None,
+    cancel_event=None,
 ) -> int:
     runtime_settings = normalize_settings(settings or load_settings())
-    raw_settings = settings if isinstance(settings, dict) else {}
-    output_format = normalize_output_format(raw_settings.get("output_format", ""))
+    output_format = runtime_settings["output_format"]
+    overwrite_policy = runtime_settings["overwrite_policy"]
     runtime_settings["output_format"] = output_format
     request_url = derive_chat_completions_url(runtime_settings["api_url"])
     languages = get_active_languages(codes)
@@ -846,6 +963,7 @@ def run_translation(
     logger(f"并发数: {MAX_CONCURRENT}")
     logger(f"API 地址: {request_url}")
     logger(f"模型: {runtime_settings['model_id']}")
+    logger(f"覆盖策略: {OVERWRITE_POLICIES[overwrite_policy]}")
     if runtime_settings["proxy_url"]:
         logger(f"手动代理: {runtime_settings['proxy_url']}")
     else:
@@ -867,42 +985,95 @@ def run_translation(
     logger("")
 
     all_tasks = []
+    results = []
+    reserved_output_paths = set()
     for code, lang_config in languages.items():
         output_dir = output_dirs[code]
         for image_path in images:
+            base_output_path = output_path_for_image(image_path, output_dir, output_format)
+            output_path = resolve_output_path(
+                base_output_path,
+                overwrite_policy,
+                reserved_output_paths,
+            )
+            if output_path is None:
+                result = {
+                    "success": True,
+                    "skipped": True,
+                    "input": image_path.name,
+                    "output": base_output_path.name,
+                    "time_ms": 0,
+                    "error": None,
+                    "language": lang_config["folder"],
+                }
+                results.append(result)
+                logger(
+                    f"跳过 [{lang_config['folder']}] {image_path.name} - 输出已存在: "
+                    f"{base_output_path.name}"
+                )
+                continue
+            reserved_output_paths.add(output_path)
             all_tasks.append(
                 (
                     image_path,
-                    output_path_for_image(image_path, output_dir, output_format),
+                    output_path,
                     lang_config,
                 )
             )
 
-    results = []
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as executor:
-        future_map = {
-            executor.submit(
-                translate_image,
-                image_path,
-                output_path,
-                lang_config,
-                runtime_settings,
-            ): (
-                image_path,
-                lang_config,
-            )
-            for image_path, output_path, lang_config in all_tasks
-        }
+    def is_cancelled():
+        return bool(cancel_event is not None and cancel_event.is_set())
 
-        for future in as_completed(future_map):
-            result = future.result()
-            results.append(result)
-            elapsed = f"{result['time_ms'] / 1000:.2f}s"
-            language = result["language"]
-            if result["success"]:
-                logger(f"成功 [{language}] {result['input']} ({elapsed})")
-            else:
-                logger(f"失败 [{language}] {result['input']} ({elapsed}) - {result['error'][:80]}")
+    def log_result(result):
+        elapsed = f"{result['time_ms'] / 1000:.2f}s"
+        language = result["language"]
+        if result.get("skipped"):
+            return
+        if result["success"]:
+            logger(f"成功 [{language}] {result['input']} ({elapsed})")
+        else:
+            logger(f"失败 [{language}] {result['input']} ({elapsed}) - {result['error'][:80]}")
+
+    task_index = 0
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as executor:
+        pending = set()
+
+        def submit_next():
+            nonlocal task_index
+            if is_cancelled() or task_index >= len(all_tasks):
+                return False
+            image_path, output_path, lang_config = all_tasks[task_index]
+            task_index += 1
+            pending.add(
+                executor.submit(
+                    translate_image,
+                    image_path,
+                    output_path,
+                    lang_config,
+                    runtime_settings,
+                )
+            )
+            return True
+
+        for _index in range(min(MAX_CONCURRENT, len(all_tasks))):
+            submit_next()
+
+        while pending:
+            for future in as_completed(pending):
+                pending.remove(future)
+                result = future.result()
+                results.append(result)
+                log_result(result)
+                if not is_cancelled():
+                    submit_next()
+                break
+
+    total_planned = len(all_tasks) + len([item for item in results if item.get("skipped")])
+    cancelled = is_cancelled() and len(results) < total_planned
+    if cancelled:
+        remaining_count = total_planned - len(results)
+        logger("")
+        logger(f"任务已取消，未继续提交剩余 {remaining_count} 个任务。")
 
     total_time_ms = int((time.time() - start_time) * 1000)
     logger("")
@@ -911,21 +1082,33 @@ def run_translation(
     logger("=" * 60)
 
     total_success = 0
+    total_skipped = 0
     total_fail = 0
     for code, lang_config in languages.items():
         lang_folder = lang_config["folder"]
         lang_results = [item for item in results if item["language"] == lang_folder]
-        success_count = sum(1 for item in lang_results if item["success"])
-        fail_count = len(lang_results) - success_count
+        skipped_count = sum(1 for item in lang_results if item.get("skipped"))
+        success_count = sum(
+            1 for item in lang_results if item["success"] and not item.get("skipped")
+        )
+        fail_count = sum(1 for item in lang_results if not item["success"])
         total_success += success_count
+        total_skipped += skipped_count
         total_fail += fail_count
-        logger(f"{lang_config['name']}: {success_count}/{len(lang_results)} 成功")
+        line = f"{lang_config['name']}: {success_count}/{len(lang_results) - skipped_count} 成功"
+        if skipped_count:
+            line += f"，跳过 {skipped_count}"
+        logger(line)
 
     logger("")
-    logger(f"总成功: {total_success}/{len(results)}")
+    logger(f"总成功: {total_success}/{len(results) - total_skipped}")
+    if total_skipped:
+        logger(f"总跳过: {total_skipped}")
     logger(f"总失败: {total_fail}/{len(results)}")
     logger(f"总耗时: {total_time_ms / 1000:.2f} 秒")
     logger(f"结束时间: {datetime.now().strftime('%H:%M:%S')}")
+    if cancelled:
+        return CANCELLED_EXIT_CODE
     return 0 if total_fail == 0 else 1
 
 
@@ -955,6 +1138,7 @@ def main() -> int:
     if args.proxy_url.strip():
         settings["proxy_url"] = args.proxy_url.strip()
     settings["output_format"] = normalize_output_format(args.output_format)
+    settings["overwrite_policy"] = normalize_overwrite_policy(args.overwrite_policy)
 
     return run_translation(
         codes,

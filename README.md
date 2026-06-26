@@ -8,9 +8,12 @@
 - 支持多语言翻译：英语、西班牙语、阿拉伯语、葡萄牙语、印地语、法语、德语、日语、韩语、俄语、意大利语、荷兰语、波兰语、瑞典语、土耳其语、印尼语、泰语、越南语、马来语、菲律宾语、希伯来语、波斯语、繁体中文。
 - 支持自定义输入目录和输出目录。
 - 支持输出格式：PNG、WebP、JPG、JPEG。
+- 支持覆盖策略：覆盖已有文件、跳过已有文件、自动重命名。
+- 支持运行中取消任务，取消后不再提交剩余图片和语言任务。
 - 支持 API 地址、API Key、模型 ID、代理地址配置。
 - 支持根据当前 API 地址自动推导模型列表接口，并在界面中搜索、选择模型 ID。
 - 支持五种界面配色切换，默认纯白简洁：清爽浅色、暗红橙战斗、墨绿金属、纯黑高对比、纯白简洁。
+- 支持保存常用偏好：输入目录、输出目录、输出格式、语言选择和覆盖策略。
 - 支持 Tkinter 桌面界面、窗口缩放、鼠标滚轮滚动和实时日志。
 - 支持 PyInstaller 打包为 Windows 可执行文件。
 
@@ -68,6 +71,8 @@ Copy-Item settings.example.json settings.json
 - 模型 ID
 - 代理地址
 - 界面配色
+- 输入目录和输出目录
+- 输出格式、语言选择和覆盖策略
 
 API 地址可以填写完整的 `.../chat/completions`，也可以填写类似 `https://openrouter.ai/api/v1/` 的 base URL。翻译时程序会自动补全到 `.../chat/completions`。
 
@@ -95,6 +100,7 @@ python image_translate_openrouter.py --languages en --source-dir "E:\input" --ou
 - `--source-dir`：输入图片文件夹。
 - `--output-dir`：输出文件夹。
 - `--output-format`：输出格式，支持 `png`、`webp`、`jpg`、`jpeg`。
+- `--overwrite-policy`：输出文件已存在时的处理方式，支持 `overwrite`、`skip`、`rename`。
 - `--api-url`、`--api-key`、`--model-id`、`--proxy-url`：临时覆盖本地配置。
 
 ## 测试
