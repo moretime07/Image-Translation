@@ -3,6 +3,7 @@
 """Pick languages and run translation directly from a small UI."""
 
 import queue
+import os
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -15,7 +16,8 @@ LANGUAGES = [
 ]
 LANGUAGE_COLUMNS = 3
 DEFAULT_CODES = {"en"}
-WINDOW_TITLE = "自定义语言翻译"
+APP_VERSION = "v1.0.4"
+WINDOW_TITLE = f"自定义语言翻译 {APP_VERSION}"
 WINDOW_GEOMETRY = "980x780"
 WINDOW_MIN_SIZE = (760, 560)
 MODEL_SELECTOR_SIZE = (620, 520)
@@ -263,6 +265,22 @@ def configure_app_style(root, theme_id=DEFAULT_THEME_ID):
         bordercolor=[("focus", APP_THEME["primary"])],
     )
     style.configure(
+        "App.TSpinbox",
+        fieldbackground=APP_THEME["input"],
+        foreground=APP_THEME["text"],
+        insertcolor=APP_THEME["primary_hover"],
+        bordercolor=APP_THEME["border_soft"],
+        lightcolor=APP_THEME["border"],
+        darkcolor=APP_THEME["border_soft"],
+        arrowcolor=APP_THEME["accent"],
+        padding=5,
+    )
+    style.map(
+        "App.TSpinbox",
+        fieldbackground=[("focus", APP_THEME["input_focus"])],
+        bordercolor=[("focus", APP_THEME["primary"])],
+    )
+    style.configure(
         "App.TCombobox",
         fieldbackground=APP_THEME["input"],
         background=APP_THEME["panel_alt"],
@@ -336,6 +354,14 @@ def configure_app_style(root, theme_id=DEFAULT_THEME_ID):
         "Subtle.TButton",
         background=[("pressed", APP_THEME["border"]), ("active", APP_THEME["panel_alt"])],
         foreground=[("active", APP_THEME["text"])],
+    )
+    style.configure(
+        "App.Horizontal.TProgressbar",
+        troughcolor=APP_THEME["input"],
+        background=APP_THEME["primary"],
+        bordercolor=APP_THEME["border_soft"],
+        lightcolor=APP_THEME["primary_hover"],
+        darkcolor=APP_THEME["primary_pressed"],
     )
     style.configure(
         "App.TCheckbutton",
@@ -890,10 +916,13 @@ class App:
         self.output_format = tk.StringVar(value=saved_settings["output_format"])
         self.overwrite_policy = tk.StringVar(value=overwrite_policy)
         self.overwrite_policy_label = tk.StringVar(value=overwrite_policy_label(overwrite_policy))
+        self.max_concurrent = tk.StringVar(value=str(saved_settings["max_concurrent"]))
         self.api_url = tk.StringVar(value=saved_settings["api_url"])
         self.api_key = tk.StringVar(value=saved_settings["api_key"])
         self.model_id = tk.StringVar(value=saved_settings["model_id"])
         self.proxy_url = tk.StringVar(value=saved_settings["proxy_url"])
+        self.progress_value = tk.IntVar(value=0)
+        self.progress_text = tk.StringVar(value="进度：0/0")
         self.log_queue = queue.Queue()
         self.worker = None
         self.cancel_event = threading.Event()
@@ -1046,6 +1075,16 @@ class App:
         self.create_button(
             paths_frame, text="选择", command=self.choose_output_dir, row=1, column=2, sticky="e", pady=4
         )
+        self.create_button(
+            paths_frame,
+            text="打开输出文件夹",
+            command=self.open_output_folder,
+            row=1,
+            column=3,
+            sticky="e",
+            padx=(8, 0),
+            pady=4,
+        )
 
         format_frame = self.create_section(frame, text="输出图片格式", padding=10, fill="x", pady=(0, 12))
         for column in range(len(translator.OUTPUT_FORMATS)):
@@ -1084,6 +1123,21 @@ class App:
         overwrite_combo.bind("<<ComboboxSelected>>", self.on_overwrite_policy_selected)
         configure_combobox_popdown(overwrite_combo)
 
+        ttk.Label(format_frame, text="并发数", style="Panel.TLabel").grid(
+            row=2,
+            column=0,
+            sticky="w",
+            pady=(10, 0),
+        )
+        ttk.Spinbox(
+            format_frame,
+            from_=1,
+            to=translator.MAX_CONCURRENT_LIMIT,
+            textvariable=self.max_concurrent,
+            width=8,
+            style="App.TSpinbox",
+        ).grid(row=2, column=1, sticky="w", padx=(10, 0), pady=(10, 0))
+
         button_row = ttk.Frame(frame, style="App.TFrame")
         button_row.pack(fill="x", pady=(4, 8))
         button_row.columnconfigure(0, weight=1)
@@ -1112,10 +1166,37 @@ class App:
             padx=(6, 0),
         )
         self.cancel_button.configure(state="disabled")
+
+        progress_frame = ttk.Frame(frame, style="App.TFrame")
+        progress_frame.pack(fill="x", pady=(4, 8))
+        progress_frame.columnconfigure(0, weight=1)
+        self.progress_bar = ttk.Progressbar(
+            progress_frame,
+            variable=self.progress_value,
+            maximum=1,
+            mode="determinate",
+            style="App.Horizontal.TProgressbar",
+        )
+        self.progress_bar.grid(row=0, column=0, sticky="ew", padx=(0, 10))
+        ttk.Label(
+            progress_frame,
+            textvariable=self.progress_text,
+            style="Hint.TLabel",
+        ).grid(row=0, column=1, sticky="e")
+
         self.create_button(
             frame,
             text="清空选择",
             command=self.clear_all,
+            variant="subtle",
+            manager="pack",
+            fill="x",
+            pady=(8, 0),
+        )
+        self.create_button(
+            frame,
+            text="保存日志",
+            command=self.save_log,
             variant="subtle",
             manager="pack",
             fill="x",
@@ -1155,6 +1236,43 @@ class App:
         if selected:
             self.output_dir.set(selected)
 
+    def open_output_folder(self):
+        output_dir = self.output_dir.get().strip()
+        if not output_dir:
+            messagebox.showerror("提示", "请先填写输出文件夹。")
+            return
+        path = os.path.abspath(output_dir)
+        try:
+            os.makedirs(path, exist_ok=True)
+            os.startfile(path)
+        except OSError as exc:
+            messagebox.showerror("打开失败", str(exc))
+
+    def redacted_log_text(self):
+        text = self.log.get("1.0", "end-1c")
+        api_key = self.api_key.get().strip()
+        if api_key:
+            text = text.replace(api_key, "***")
+        return text
+
+    def save_log(self):
+        selected = filedialog.asksaveasfilename(
+            title="保存运行日志",
+            initialdir=self.output_dir.get() or str(translator.BASE_DIR),
+            initialfile="translation-log.txt",
+            defaultextension=".txt",
+            filetypes=(("Text files", "*.txt"), ("All files", "*.*")),
+        )
+        if not selected:
+            return
+        try:
+            with open(selected, "w", encoding="utf-8") as file_obj:
+                file_obj.write(self.redacted_log_text())
+        except OSError as exc:
+            messagebox.showerror("保存失败", str(exc))
+            return
+        self.append_log(f"日志已保存: {selected}")
+
     def apply_theme(self, theme_id):
         normalized_theme_id = normalize_theme_id(theme_id)
         self.theme_id.set(normalized_theme_id)
@@ -1193,6 +1311,7 @@ class App:
             "output_format": self.output_format.get(),
             "selected_languages": self.selected_codes() if self.vars else list(DEFAULT_CODES),
             "overwrite_policy": self.overwrite_policy.get(),
+            "max_concurrent": self.max_concurrent.get(),
         }
 
     def save_settings(self, show_message=True):
@@ -1212,6 +1331,7 @@ class App:
         self.output_format.set(saved["output_format"])
         self.overwrite_policy.set(saved["overwrite_policy"])
         self.overwrite_policy_label.set(overwrite_policy_label(saved["overwrite_policy"]))
+        self.max_concurrent.set(str(saved["max_concurrent"]))
         self.apply_theme(saved.get("theme_id", DEFAULT_THEME_ID))
         if show_message:
             messagebox.showinfo("已保存", "设置已保存。")
@@ -1245,11 +1365,21 @@ class App:
         self.log.see("end")
         self.log.configure(state="disabled")
 
+    def update_progress(self, completed, total):
+        safe_total = max(int(total or 0), 0)
+        safe_completed = max(0, min(int(completed or 0), safe_total))
+        maximum = max(safe_total, 1)
+        self.progress_bar.configure(maximum=maximum)
+        self.progress_value.set(safe_completed)
+        self.progress_text.set(f"进度：{safe_completed}/{safe_total}")
+
     def flush_logs(self):
         try:
             while True:
                 item = self.log_queue.get_nowait()
-                if isinstance(item, tuple) and item[0] == "__done__":
+                if isinstance(item, tuple) and item[0] == "__progress__":
+                    self.update_progress(item[1], item[2])
+                elif isinstance(item, tuple) and item[0] == "__done__":
                     exit_code = item[1]
                     self.start_button.configure(state="normal")
                     self.cancel_button.configure(state="disabled")
@@ -1284,6 +1414,7 @@ class App:
             return
         settings["output_format"] = self.output_format.get()
         settings["overwrite_policy"] = self.overwrite_policy.get()
+        settings["max_concurrent"] = self.max_concurrent.get()
 
         source_dir = self.source_dir.get().strip()
         output_dir = self.output_dir.get().strip()
@@ -1304,9 +1435,13 @@ class App:
         self.cancel_event.clear()
         self.start_button.configure(state="disabled")
         self.cancel_button.configure(state="normal")
+        self.update_progress(0, 0)
 
         def logger(message):
             self.log_queue.put(message)
+
+        def progress_callback(completed, total, _result=None):
+            self.log_queue.put(("__progress__", completed, total))
 
         def worker():
             try:
@@ -1317,6 +1452,7 @@ class App:
                     source_dir=source_dir,
                     output_dir=output_dir,
                     cancel_event=self.cancel_event,
+                    progress_callback=progress_callback,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger(f"任务异常: {type(exc).__name__}: {exc}")

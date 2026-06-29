@@ -28,6 +28,10 @@ DEFAULT_THEME_ID = "scheme_5"
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 PROXY_URL = os.environ.get("OPENROUTER_PROXY_URL", "").strip()
 MAX_CONCURRENT = 4
+MAX_CONCURRENT_LIMIT = 16
+TRANSLATE_MAX_ATTEMPTS = 3
+RETRY_BASE_DELAY_SECONDS = 1.0
+RATE_LIMIT_RETRY_DELAY_SECONDS = 3.0
 OUTPUT_SIZE = "1080x1080"
 DEFAULT_SELECTED_LANGUAGE_CODES = ("en",)
 CANCELLED_EXIT_CODE = 2
@@ -83,6 +87,7 @@ SETTING_KEYS = (
     "output_format",
     "selected_languages",
     "overwrite_policy",
+    "max_concurrent",
 )
 
 
@@ -98,6 +103,7 @@ def default_settings() -> dict:
         "output_format": DEFAULT_OUTPUT_FORMAT,
         "selected_languages": list(DEFAULT_SELECTED_LANGUAGE_CODES),
         "overwrite_policy": DEFAULT_OVERWRITE_POLICY,
+        "max_concurrent": MAX_CONCURRENT,
     }
 
 
@@ -109,6 +115,14 @@ def normalize_output_format(value: str = "") -> str:
 def normalize_overwrite_policy(value: str = "") -> str:
     policy = str(value or DEFAULT_OVERWRITE_POLICY).strip().lower()
     return policy if policy in OVERWRITE_POLICIES else DEFAULT_OVERWRITE_POLICY
+
+
+def normalize_max_concurrent(value=None) -> int:
+    try:
+        count = int(str(value if value not in (None, "") else MAX_CONCURRENT).strip())
+    except (TypeError, ValueError):
+        count = MAX_CONCURRENT
+    return max(1, min(count, MAX_CONCURRENT_LIMIT))
 
 
 def normalize_selected_languages(value) -> list:
@@ -188,6 +202,7 @@ def normalize_settings(raw_settings=None) -> dict:
     settings["overwrite_policy"] = normalize_overwrite_policy(
         settings.get("overwrite_policy", "")
     )
+    settings["max_concurrent"] = normalize_max_concurrent(settings.get("max_concurrent"))
     return settings
 
 
@@ -392,6 +407,44 @@ def format_http_error(status_code: int, route_name: str, body_or_reason: str = "
     return f"HTTP {status_code} via {route_name}: {hint}"
 
 
+def is_retryable_http_status(status_code: int) -> bool:
+    return status_code in {408, 409, 425, 429} or 500 <= status_code <= 599
+
+
+def retry_delay_seconds(attempt_index: int, status_code: int = None) -> float:
+    base_delay = (
+        RATE_LIMIT_RETRY_DELAY_SECONDS
+        if status_code == 429
+        else RETRY_BASE_DELAY_SECONDS
+    )
+    return base_delay * max(1, attempt_index)
+
+
+def http_status_from_error(error_text: str) -> int:
+    if not error_text.startswith("HTTP "):
+        return 0
+    parts = error_text.split(maxsplit=2)
+    if len(parts) < 2:
+        return 0
+    try:
+        return int(parts[1])
+    except ValueError:
+        return 0
+
+
+def is_retryable_translate_error(error_text: str) -> bool:
+    status_code = http_status_from_error(error_text or "")
+    if status_code:
+        return is_retryable_http_status(status_code)
+    return (
+        error_text.startswith("URL Error")
+        or "JSON via" in error_text
+        or error_text.startswith("No image")
+        or error_text.startswith("Failed to save image")
+        or error_text.startswith("Model returned text instead of image")
+    )
+
+
 def fetch_available_models(settings: dict) -> list:
     runtime_settings = normalize_settings(settings)
     errors = validate_model_fetch_settings(runtime_settings)
@@ -492,6 +545,7 @@ def parse_args():
         choices=tuple(OVERWRITE_POLICIES.keys()),
         default=DEFAULT_OVERWRITE_POLICY,
     )
+    parser.add_argument("--max-concurrent", default="")
     parser.add_argument("--api-url", default="")
     parser.add_argument("--api-key", default="")
     parser.add_argument("--model-id", default="")
@@ -809,7 +863,7 @@ def extract_and_save_image(
     return f"Model returned text instead of image: {preview or 'empty'}"
 
 
-def translate_image(
+def _translate_image_once(
     image_path: Path,
     output_path: Path,
     lang_config: dict,
@@ -887,6 +941,41 @@ def translate_image(
     }
 
 
+def translate_image(
+    image_path: Path,
+    output_path: Path,
+    lang_config: dict,
+    settings: dict = None,
+) -> dict:
+    start_time = time.time()
+    last_result = None
+
+    for attempt_index in range(1, TRANSLATE_MAX_ATTEMPTS + 1):
+        result = _translate_image_once(image_path, output_path, lang_config, settings)
+        result["attempts"] = attempt_index
+        result["time_ms"] = int((time.time() - start_time) * 1000)
+        last_result = result
+
+        if result["success"]:
+            return result
+
+        error_text = str(result.get("error") or "")
+        if (
+            attempt_index >= TRANSLATE_MAX_ATTEMPTS
+            or not is_retryable_translate_error(error_text)
+        ):
+            return result
+
+        time.sleep(
+            retry_delay_seconds(
+                attempt_index,
+                http_status_from_error(error_text),
+            )
+        )
+
+    return last_result
+
+
 def collect_images(source_dir: Path):
     return sorted(
         [
@@ -906,10 +995,12 @@ def run_translation(
     source_dir: Path = None,
     output_dir: Path = None,
     cancel_event=None,
+    progress_callback=None,
 ) -> int:
     runtime_settings = normalize_settings(settings or load_settings())
     output_format = runtime_settings["output_format"]
     overwrite_policy = runtime_settings["overwrite_policy"]
+    max_concurrent = runtime_settings["max_concurrent"]
     runtime_settings["output_format"] = output_format
     request_url = derive_chat_completions_url(runtime_settings["api_url"])
     languages = get_active_languages(codes)
@@ -960,7 +1051,7 @@ def run_translation(
         output_dirs[code] = output_dir
 
     logger(f"图片数量: {len(images)}")
-    logger(f"并发数: {MAX_CONCURRENT}")
+    logger(f"并发数: {max_concurrent}")
     logger(f"API 地址: {request_url}")
     logger(f"模型: {runtime_settings['model_id']}")
     logger(f"覆盖策略: {OVERWRITE_POLICIES[overwrite_policy]}")
@@ -1027,6 +1118,9 @@ def run_translation(
     def log_result(result):
         elapsed = f"{result['time_ms'] / 1000:.2f}s"
         language = result["language"]
+        attempts = int(result.get("attempts") or 1)
+        if attempts > 1:
+            elapsed = f"{elapsed}, attempts={attempts}"
         if result.get("skipped"):
             return
         if result["success"]:
@@ -1034,8 +1128,18 @@ def run_translation(
         else:
             logger(f"失败 [{language}] {result['input']} ({elapsed}) - {result['error'][:80]}")
 
+    completed_count = len([item for item in results if item.get("skipped")])
+    total_planned = len(all_tasks) + completed_count
+
+    def report_progress(result=None):
+        if progress_callback is None:
+            return
+        progress_callback(completed_count, total_planned, result)
+
+    report_progress()
+
     task_index = 0
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as executor:
+    with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
         pending = set()
 
         def submit_next():
@@ -1055,7 +1159,7 @@ def run_translation(
             )
             return True
 
-        for _index in range(min(MAX_CONCURRENT, len(all_tasks))):
+        for _index in range(min(max_concurrent, len(all_tasks))):
             submit_next()
 
         while pending:
@@ -1064,11 +1168,12 @@ def run_translation(
                 result = future.result()
                 results.append(result)
                 log_result(result)
+                completed_count += 1
+                report_progress(result)
                 if not is_cancelled():
                     submit_next()
                 break
 
-    total_planned = len(all_tasks) + len([item for item in results if item.get("skipped")])
     cancelled = is_cancelled() and len(results) < total_planned
     if cancelled:
         remaining_count = total_planned - len(results)
@@ -1107,6 +1212,18 @@ def run_translation(
     logger(f"总失败: {total_fail}/{len(results)}")
     logger(f"总耗时: {total_time_ms / 1000:.2f} 秒")
     logger(f"结束时间: {datetime.now().strftime('%H:%M:%S')}")
+    failed_results = [item for item in results if not item["success"]]
+    if failed_results:
+        logger("")
+        logger("失败明细")
+        for item in failed_results:
+            attempts = item.get("attempts")
+            attempts_note = f" (attempts={attempts})" if attempts else ""
+            logger(
+                f"- [{item['language']}] {item['input']}{attempts_note}: "
+                f"{item.get('error') or 'Unknown error'}"
+            )
+
     if cancelled:
         return CANCELLED_EXIT_CODE
     return 0 if total_fail == 0 else 1
@@ -1139,6 +1256,8 @@ def main() -> int:
         settings["proxy_url"] = args.proxy_url.strip()
     settings["output_format"] = normalize_output_format(args.output_format)
     settings["overwrite_policy"] = normalize_overwrite_policy(args.overwrite_policy)
+    if args.max_concurrent.strip():
+        settings["max_concurrent"] = normalize_max_concurrent(args.max_concurrent)
 
     return run_translation(
         codes,

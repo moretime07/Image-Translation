@@ -78,6 +78,19 @@ class RaisingOpener:
         raise self.exc
 
 
+class SequenceOpener:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.requests = []
+
+    def open(self, request, timeout=0):
+        self.requests.append((request, timeout))
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+
 class SettingsTests(unittest.TestCase):
     def test_save_and_load_settings_round_trip(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -126,6 +139,7 @@ class SettingsTests(unittest.TestCase):
                 "output_format": "webp",
                 "selected_languages": ["ja", "ko"],
                 "overwrite_policy": "rename",
+                "max_concurrent": 2,
             }
 
             translator.save_settings(settings, settings_path)
@@ -136,6 +150,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(loaded["output_format"], "webp")
         self.assertEqual(loaded["selected_languages"], ["ja", "ko"])
         self.assertEqual(loaded["overwrite_policy"], "rename")
+        self.assertEqual(loaded["max_concurrent"], 2)
 
     def test_validate_settings_reports_missing_or_invalid_fields(self):
         errors = translator.validate_settings(
@@ -199,12 +214,13 @@ class SettingsTests(unittest.TestCase):
             with patch.object(
                 translator, "build_openers", return_value=[(fake_opener, "fake")]
             ):
-                result = translator.translate_image(
-                    input_path,
-                    output_path,
-                    {"prompt": "translate this", "folder": "English"},
-                    settings,
-                )
+                with patch.object(translator.time, "sleep"):
+                    result = translator.translate_image(
+                        input_path,
+                        output_path,
+                        {"prompt": "translate this", "folder": "English"},
+                        settings,
+                    )
 
             self.assertTrue(result["success"])
             self.assertTrue(output_path.exists())
@@ -254,12 +270,13 @@ class SettingsTests(unittest.TestCase):
             with patch.object(
                 translator, "build_openers", return_value=[(fake_opener, "fake")]
             ):
-                result = translator.translate_image(
-                    input_path,
-                    output_path,
-                    {"prompt": "translate this", "folder": "English"},
-                    settings,
-                )
+                with patch.object(translator.time, "sleep"):
+                    result = translator.translate_image(
+                        input_path,
+                        output_path,
+                        {"prompt": "translate this", "folder": "English"},
+                        settings,
+                    )
 
         self.assertTrue(result["success"])
         self.assertEqual(
@@ -325,12 +342,13 @@ class SettingsTests(unittest.TestCase):
             with patch.object(
                 translator, "build_openers", return_value=[(fake_opener, "direct")]
             ):
-                result = translator.translate_image(
-                    input_path,
-                    output_path,
-                    {"prompt": "translate this", "folder": "English"},
-                    settings,
-                )
+                with patch.object(translator.time, "sleep"):
+                    result = translator.translate_image(
+                        input_path,
+                        output_path,
+                        {"prompt": "translate this", "folder": "English"},
+                        settings,
+                    )
 
         self.assertFalse(result["success"])
         self.assertIn("HTTP 401", result["error"])
@@ -363,16 +381,139 @@ class SettingsTests(unittest.TestCase):
             with patch.object(
                 translator, "build_openers", return_value=[(fake_opener, "direct")]
             ):
-                result = translator.translate_image(
-                    input_path,
-                    output_path,
-                    {"prompt": "translate this", "folder": "English"},
-                    settings,
-                )
+                with patch.object(translator.time, "sleep"):
+                    result = translator.translate_image(
+                        input_path,
+                        output_path,
+                        {"prompt": "translate this", "folder": "English"},
+                        settings,
+                    )
 
         self.assertFalse(result["success"])
         self.assertIn("HTTP 429", result["error"])
         self.assertIn("降低并发", result["error"])
+
+    def test_translate_image_retries_transient_http_error_and_succeeds(self):
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "images": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/png;base64,"
+                                    + base64.b64encode(PNG_BYTES).decode("ascii")
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        http_error = urllib.error.HTTPError(
+            "https://api.example.test/v1/chat/completions",
+            503,
+            "Service Unavailable",
+            {},
+            io.BytesIO(b'{"error":"busy"}'),
+        )
+        fake_opener = SequenceOpener(
+            [
+                http_error,
+                FakeResponse(json.dumps(response).encode("utf-8")),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_path = temp_path / "input.png"
+            output_path = temp_path / "output.png"
+            input_path.write_bytes(PNG_BYTES)
+
+            settings = {
+                "api_url": "https://api.example.test/v1/",
+                "api_key": "configured-key",
+                "model_id": "configured-model",
+                "proxy_url": "",
+                "output_format": "png",
+            }
+
+            with patch.object(
+                translator, "build_openers", return_value=[(fake_opener, "direct")]
+            ):
+                with patch.object(translator.time, "sleep") as sleep:
+                    result = translator.translate_image(
+                        input_path,
+                        output_path,
+                        {"prompt": "translate this", "folder": "English"},
+                        settings,
+                    )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(len(fake_opener.requests), 2)
+        sleep.assert_called_once()
+
+    def test_translate_image_uses_rate_limit_backoff_for_429_retry(self):
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "images": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/png;base64,"
+                                    + base64.b64encode(PNG_BYTES).decode("ascii")
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        http_error = urllib.error.HTTPError(
+            "https://api.example.test/v1/chat/completions",
+            429,
+            "Too Many Requests",
+            {},
+            io.BytesIO(b'{"error":"rate limit"}'),
+        )
+        fake_opener = SequenceOpener(
+            [
+                http_error,
+                FakeResponse(json.dumps(response).encode("utf-8")),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_path = temp_path / "input.png"
+            output_path = temp_path / "output.png"
+            input_path.write_bytes(PNG_BYTES)
+
+            settings = {
+                "api_url": "https://api.example.test/v1/",
+                "api_key": "configured-key",
+                "model_id": "configured-model",
+                "proxy_url": "",
+                "output_format": "png",
+            }
+
+            with patch.object(
+                translator, "build_openers", return_value=[(fake_opener, "direct")]
+            ):
+                with patch.object(translator.time, "sleep") as sleep:
+                    result = translator.translate_image(
+                        input_path,
+                        output_path,
+                        {"prompt": "translate this", "folder": "English"},
+                        settings,
+                    )
+
+        self.assertTrue(result["success"])
+        self.assertGreaterEqual(sleep.call_args_list[0].args[0], 3)
 
     def test_translate_image_converts_response_to_configured_output_format(self):
         response = {
@@ -801,10 +942,18 @@ class WindowLayoutTests(unittest.TestCase):
             app.root.destroy()
 
         self.assertIn("取消任务", button_texts)
+        self.assertIn("打开输出文件夹", button_texts)
+        self.assertIn("保存日志", button_texts)
         self.assertIn(
             ("覆盖已有文件", "跳过已有文件", "自动重命名"),
             combo_values,
         )
+
+    def test_version_is_visible_in_window_title(self):
+        import generate_custom_bat
+
+        self.assertEqual(generate_custom_bat.APP_VERSION, "v1.0.4")
+        self.assertIn(generate_custom_bat.APP_VERSION, generate_custom_bat.WINDOW_TITLE)
 
     def test_app_loads_saved_directory_and_output_preferences(self):
         import generate_custom_bat
@@ -817,6 +966,7 @@ class WindowLayoutTests(unittest.TestCase):
                 "output_format": "webp",
                 "selected_languages": ["ja", "ko"],
                 "overwrite_policy": "skip",
+                "max_concurrent": 2,
             }
         )
 
@@ -828,7 +978,64 @@ class WindowLayoutTests(unittest.TestCase):
             self.assertEqual(app.output_dir.get(), "D:/translated-images")
             self.assertEqual(app.output_format.get(), "webp")
             self.assertEqual(app.overwrite_policy.get(), "skip")
+            self.assertEqual(app.max_concurrent.get(), "2")
             self.assertEqual(app.selected_codes(), ["ja", "ko"])
+        finally:
+            app.root.destroy()
+
+    def test_open_output_folder_creates_and_opens_saved_output_dir(self):
+        import generate_custom_bat
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "new-output"
+            app = generate_custom_bat.App()
+            app.root.withdraw()
+            try:
+                app.output_dir.set(str(output_dir))
+                with patch.object(generate_custom_bat.os, "startfile") as startfile:
+                    app.open_output_folder()
+                self.assertTrue(output_dir.exists())
+                startfile.assert_called_once_with(str(output_dir))
+            finally:
+                app.root.destroy()
+
+    def test_save_log_exports_redacted_log_text(self):
+        import generate_custom_bat
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "translation-log.txt"
+            app = generate_custom_bat.App()
+            app.root.withdraw()
+            try:
+                app.api_key.set("secret-key")
+                app.append_log("失败: secret-key should not be exported")
+                with patch.object(
+                    generate_custom_bat.filedialog,
+                    "asksaveasfilename",
+                    return_value=str(output_path),
+                ):
+                    app.save_log()
+                saved_text = output_path.read_text(encoding="utf-8")
+            finally:
+                app.root.destroy()
+
+        self.assertIn("***", saved_text)
+        self.assertNotIn("secret-key", saved_text)
+
+    def test_progress_status_updates_from_counts(self):
+        import generate_custom_bat
+
+        app = generate_custom_bat.App()
+        app.root.withdraw()
+        try:
+            self.assertEqual(app.progress_value.get(), 0)
+            self.assertIn("0/0", app.progress_text.get())
+
+            app.update_progress(1, 4)
+
+            self.assertEqual(app.progress_value.get(), 1)
+            self.assertEqual(app.progress_bar.cget("maximum"), 4)
+            self.assertIn("1/4", app.progress_text.get())
         finally:
             app.root.destroy()
 
@@ -991,6 +1198,97 @@ class DirectorySelectionTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual([path.name for path in seen_output_paths], ["poster.jpeg"])
 
+    def test_run_translation_uses_configured_max_concurrent(self):
+        logs = []
+
+        def fake_translate(image_path, output_path, lang_config, settings):
+            output_path.write_bytes(PNG_BYTES)
+            return {
+                "success": True,
+                "input": image_path.name,
+                "output": output_path.name,
+                "time_ms": 0,
+                "error": None,
+                "language": lang_config["folder"],
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_dir = temp_path / "source"
+            output_dir = temp_path / "output"
+            source_dir.mkdir()
+            (source_dir / "poster.png").write_bytes(PNG_BYTES)
+
+            settings = {
+                "api_url": "https://api.example.test/v1/chat/completions",
+                "api_key": "test-key",
+                "model_id": "test-model",
+                "proxy_url": "",
+                "output_format": "png",
+                "max_concurrent": 2,
+            }
+
+            with patch.object(translator, "translate_image", side_effect=fake_translate):
+                with patch.object(translator, "can_connect_to_proxy", return_value=False):
+                    exit_code = translator.run_translation(
+                        ("en",),
+                        logger=logs.append,
+                        settings=settings,
+                        source_dir=source_dir,
+                        output_dir=output_dir,
+                    )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("并发数: 2", logs)
+
+    def test_run_translation_reports_progress_counts(self):
+        progress_events = []
+
+        def fake_translate(image_path, output_path, lang_config, settings):
+            output_path.write_bytes(PNG_BYTES)
+            return {
+                "success": True,
+                "input": image_path.name,
+                "output": output_path.name,
+                "time_ms": 0,
+                "error": None,
+                "language": lang_config["folder"],
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_dir = temp_path / "source"
+            output_dir = temp_path / "output"
+            source_dir.mkdir()
+            (source_dir / "poster-a.png").write_bytes(PNG_BYTES)
+            (source_dir / "poster-b.png").write_bytes(PNG_BYTES)
+
+            settings = {
+                "api_url": "https://api.example.test/v1/chat/completions",
+                "api_key": "test-key",
+                "model_id": "test-model",
+                "proxy_url": "",
+                "output_format": "png",
+                "max_concurrent": 1,
+            }
+
+            with patch.object(translator, "translate_image", side_effect=fake_translate):
+                with patch.object(translator, "can_connect_to_proxy", return_value=False):
+                    exit_code = translator.run_translation(
+                        ("en",),
+                        logger=lambda _message: None,
+                        settings=settings,
+                        source_dir=source_dir,
+                        output_dir=output_dir,
+                        progress_callback=lambda completed, total, result=None: progress_events.append(
+                            (completed, total, result["input"] if result else None)
+                        ),
+                    )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(progress_events[0], (0, 2, None))
+        self.assertEqual(progress_events[-1], (2, 2, "poster-b.png"))
+
     def test_run_translation_skips_existing_outputs_when_policy_is_skip(self):
         seen_output_paths = []
         logs = []
@@ -1090,6 +1388,52 @@ class DirectorySelectionTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual([path.name for path in seen_output_paths], ["poster-2.jpeg"])
+
+    def test_run_translation_logs_failed_item_summary(self):
+        logs = []
+
+        def fake_translate(image_path, output_path, lang_config, settings):
+            return {
+                "success": False,
+                "input": image_path.name,
+                "output": None,
+                "time_ms": 0,
+                "error": "HTTP 429 via direct: rate limit",
+                "language": lang_config["folder"],
+                "attempts": 3,
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_dir = temp_path / "source"
+            output_dir = temp_path / "output"
+            source_dir.mkdir()
+            (source_dir / "poster.png").write_bytes(PNG_BYTES)
+
+            settings = {
+                "api_url": "https://api.example.test/v1/chat/completions",
+                "api_key": "test-key",
+                "model_id": "test-model",
+                "proxy_url": "",
+                "output_format": "png",
+            }
+
+            with patch.object(translator, "translate_image", side_effect=fake_translate):
+                with patch.object(translator, "can_connect_to_proxy", return_value=False):
+                    exit_code = translator.run_translation(
+                        ("en",),
+                        logger=logs.append,
+                        settings=settings,
+                        source_dir=source_dir,
+                        output_dir=output_dir,
+                    )
+
+        self.assertEqual(exit_code, 1)
+        joined_logs = "\n".join(logs)
+        self.assertIn("失败明细", joined_logs)
+        self.assertIn("poster.png", joined_logs)
+        self.assertIn("HTTP 429", joined_logs)
+        self.assertIn("attempts=3", joined_logs)
 
     def test_run_translation_stops_submitting_work_after_cancel_event_is_set(self):
         cancel_event = threading.Event()

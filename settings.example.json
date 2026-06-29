@@ -8,5 +8,6 @@
   "output_dir": "",
   "output_format": "jpeg",
   "selected_languages": ["en"],
-  "overwrite_policy": "overwrite"
+  "overwrite_policy": "overwrite",
+  "max_concurrent": 4
 }
