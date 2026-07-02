@@ -16,7 +16,7 @@ LANGUAGES = [
 ]
 LANGUAGE_COLUMNS = 3
 DEFAULT_CODES = {"en"}
-APP_VERSION = "v1.0.4"
+APP_VERSION = "v1.0.5"
 WINDOW_TITLE = f"自定义语言翻译 {APP_VERSION}"
 WINDOW_GEOMETRY = "980x780"
 WINDOW_MIN_SIZE = (760, 560)
@@ -917,6 +917,8 @@ class App:
         self.overwrite_policy = tk.StringVar(value=overwrite_policy)
         self.overwrite_policy_label = tk.StringVar(value=overwrite_policy_label(overwrite_policy))
         self.max_concurrent = tk.StringVar(value=str(saved_settings["max_concurrent"]))
+        self.output_width = tk.StringVar(value=str(saved_settings["output_width"]))
+        self.output_height = tk.StringVar(value=str(saved_settings["output_height"]))
         self.api_url = tk.StringVar(value=saved_settings["api_url"])
         self.api_key = tk.StringVar(value=saved_settings["api_key"])
         self.model_id = tk.StringVar(value=saved_settings["model_id"])
@@ -1138,6 +1140,35 @@ class App:
             style="App.TSpinbox",
         ).grid(row=2, column=1, sticky="w", padx=(10, 0), pady=(10, 0))
 
+        ttk.Label(format_frame, text="输出尺寸", style="Panel.TLabel").grid(
+            row=3,
+            column=0,
+            sticky="w",
+            pady=(10, 0),
+        )
+        ttk.Spinbox(
+            format_frame,
+            from_=translator.MIN_OUTPUT_DIMENSION,
+            to=translator.MAX_OUTPUT_DIMENSION,
+            textvariable=self.output_width,
+            width=8,
+            style="App.TSpinbox",
+        ).grid(row=3, column=1, sticky="w", padx=(10, 0), pady=(10, 0))
+        ttk.Label(format_frame, text="x", style="Panel.TLabel").grid(
+            row=3,
+            column=2,
+            sticky="w",
+            pady=(10, 0),
+        )
+        ttk.Spinbox(
+            format_frame,
+            from_=translator.MIN_OUTPUT_DIMENSION,
+            to=translator.MAX_OUTPUT_DIMENSION,
+            textvariable=self.output_height,
+            width=8,
+            style="App.TSpinbox",
+        ).grid(row=3, column=3, sticky="w", pady=(10, 0))
+
         button_row = ttk.Frame(frame, style="App.TFrame")
         button_row.pack(fill="x", pady=(4, 8))
         button_row.columnconfigure(0, weight=1)
@@ -1312,6 +1343,8 @@ class App:
             "selected_languages": self.selected_codes() if self.vars else list(DEFAULT_CODES),
             "overwrite_policy": self.overwrite_policy.get(),
             "max_concurrent": self.max_concurrent.get(),
+            "output_width": self.output_width.get(),
+            "output_height": self.output_height.get(),
         }
 
     def save_settings(self, show_message=True):
@@ -1332,6 +1365,8 @@ class App:
         self.overwrite_policy.set(saved["overwrite_policy"])
         self.overwrite_policy_label.set(overwrite_policy_label(saved["overwrite_policy"]))
         self.max_concurrent.set(str(saved["max_concurrent"]))
+        self.output_width.set(str(saved["output_width"]))
+        self.output_height.set(str(saved["output_height"]))
         self.apply_theme(saved.get("theme_id", DEFAULT_THEME_ID))
         if show_message:
             messagebox.showinfo("已保存", "设置已保存。")
@@ -1415,6 +1450,8 @@ class App:
         settings["output_format"] = self.output_format.get()
         settings["overwrite_policy"] = self.overwrite_policy.get()
         settings["max_concurrent"] = self.max_concurrent.get()
+        settings["output_width"] = self.output_width.get()
+        settings["output_height"] = self.output_height.get()
 
         source_dir = self.source_dir.get().strip()
         output_dir = self.output_dir.get().strip()

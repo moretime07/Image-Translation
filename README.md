@@ -2,13 +2,14 @@
 
 本项目是一个本地桌面图片翻译工具，用于批量翻译图片中的文字，并尽量保持原图布局、颜色、字号和视觉风格不变。适合游戏素材、广告图、运营海报等多语言本地化场景。
 
-当前版本：v1.0.4
+当前版本：v1.0.5
 
 ## 功能
 
 - 批量读取输入文件夹中的图片。
 - 支持自定义输入目录和输出目录。
 - 支持输出格式：PNG、WebP、JPG、JPEG。
+- 支持自定义输出尺寸，例如 `1080x1080`、`1920x1080`、`1080x1920`，不再限制为方形。
 - 支持多语言翻译：英语、西班牙语、阿拉伯语、葡萄牙语、印地语、法语、德语、日语、韩语、俄语、意大利语、荷兰语、波兰语、瑞典语、土耳其语、印尼语、泰语、越南语、马来语、菲律宾语、希伯来语、波斯语、繁体中文。
 - 支持覆盖策略：覆盖已有文件、跳过已有文件、自动重命名。
 - 支持自定义并发数，遇到接口限流时可以降低并发。
@@ -20,7 +21,7 @@
 - 支持 API 地址、API Key、模型 ID、代理地址配置。
 - 支持根据当前 API 地址自动推导模型列表接口，并在界面中搜索、选择模型 ID。
 - 支持五种界面配色切换，默认纯白简洁。
-- 支持保存常用偏好：输入目录、输出目录、输出格式、语言选择、覆盖策略和并发数。
+- 支持保存常用偏好：输入目录、输出目录、输出格式、输出尺寸、语言选择、覆盖策略和并发数。
 - 支持 Tkinter 桌面界面、窗口缩放、鼠标滚轮滚动和实时日志。
 - 支持 PyInstaller 打包为 Windows 可执行文件。
 
@@ -79,7 +80,7 @@ Copy-Item settings.example.json settings.json
 - 代理地址
 - 界面配色
 - 输入目录和输出目录
-- 输出格式、语言选择、覆盖策略和并发数
+- 输出格式、输出尺寸、语言选择、覆盖策略和并发数
 
 API 地址可以填写完整的 `.../chat/completions`，也可以填写类似 `https://openrouter.ai/api/v1/` 的 base URL。翻译时程序会自动补全到 `.../chat/completions`。
 
@@ -98,7 +99,7 @@ python generate_custom_bat.py
 也可以使用命令行方式：
 
 ```powershell
-python image_translate_openrouter.py --languages en --source-dir "E:\input" --output-dir "E:\output" --output-format jpeg
+python image_translate_openrouter.py --languages en --source-dir "E:\input" --output-dir "E:\output" --output-format jpeg --output-width 1920 --output-height 1080
 ```
 
 常用参数：
@@ -107,6 +108,8 @@ python image_translate_openrouter.py --languages en --source-dir "E:\input" --ou
 - `--source-dir`：输入图片文件夹。
 - `--output-dir`：输出文件夹。
 - `--output-format`：输出格式，支持 `png`、`webp`、`jpg`、`jpeg`。
+- `--output-width`：输出图片宽度，默认 `1080`。
+- `--output-height`：输出图片高度，默认 `1080`。
 - `--overwrite-policy`：输出文件已存在时的处理方式，支持 `overwrite`、`skip`、`rename`。
 - `--max-concurrent`：并发数，建议在接口限流时调低。
 - `--api-url`、`--api-key`、`--model-id`、`--proxy-url`：临时覆盖本地配置。

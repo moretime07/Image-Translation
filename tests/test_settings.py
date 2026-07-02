@@ -140,6 +140,8 @@ class SettingsTests(unittest.TestCase):
                 "selected_languages": ["ja", "ko"],
                 "overwrite_policy": "rename",
                 "max_concurrent": 2,
+                "output_width": 1920,
+                "output_height": 1080,
             }
 
             translator.save_settings(settings, settings_path)
@@ -151,6 +153,8 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(loaded["selected_languages"], ["ja", "ko"])
         self.assertEqual(loaded["overwrite_policy"], "rename")
         self.assertEqual(loaded["max_concurrent"], 2)
+        self.assertEqual(loaded["output_width"], 1920)
+        self.assertEqual(loaded["output_height"], 1080)
 
     def test_validate_settings_reports_missing_or_invalid_fields(self):
         errors = translator.validate_settings(
@@ -283,6 +287,58 @@ class SettingsTests(unittest.TestCase):
             fake_opener.requests[0][0].full_url,
             "https://api.example.test/v1/chat/completions",
         )
+
+    def test_translate_image_uses_configured_rectangular_output_size_in_prompt(self):
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "images": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/png;base64,"
+                                    + base64.b64encode(PNG_BYTES).decode("ascii")
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        fake_opener = FakeOpener(json.dumps(response).encode("utf-8"))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_path = temp_path / "input.png"
+            output_path = temp_path / "output.png"
+            input_path.write_bytes(PNG_BYTES)
+
+            settings = {
+                "api_url": "https://api.example.test/v1/",
+                "api_key": "configured-key",
+                "model_id": "configured-model",
+                "proxy_url": "",
+                "output_format": "png",
+                "output_width": 1920,
+                "output_height": 1080,
+            }
+
+            with patch.object(
+                translator, "build_openers", return_value=[(fake_opener, "fake")]
+            ):
+                result = translator.translate_image(
+                    input_path,
+                    output_path,
+                    translator.LANGUAGE_SPECS["en"],
+                    settings,
+                )
+
+        payload = json.loads(fake_opener.requests[0][0].data.decode("utf-8"))
+        prompt = payload["messages"][0]["content"][0]["text"]
+        self.assertTrue(result["success"])
+        self.assertIn("1920x1080", prompt)
+        self.assertNotIn("1080x1080", prompt)
 
     def test_translate_image_reports_non_json_api_response_clearly(self):
         fake_opener = FakeOpener(b"<html>not json</html>")
@@ -822,7 +878,12 @@ class WindowLayoutTests(unittest.TestCase):
     def test_default_ui_selection_matches_marked_choices(self):
         import generate_custom_bat
 
-        app = generate_custom_bat.App()
+        with patch.object(
+            generate_custom_bat.translator,
+            "load_settings",
+            return_value=generate_custom_bat.translator.default_settings(),
+        ):
+            app = generate_custom_bat.App()
         app.root.withdraw()
         try:
             self.assertEqual(app.selected_codes(), ["en"])
@@ -952,7 +1013,7 @@ class WindowLayoutTests(unittest.TestCase):
     def test_version_is_visible_in_window_title(self):
         import generate_custom_bat
 
-        self.assertEqual(generate_custom_bat.APP_VERSION, "v1.0.4")
+        self.assertEqual(generate_custom_bat.APP_VERSION, "v1.0.5")
         self.assertIn(generate_custom_bat.APP_VERSION, generate_custom_bat.WINDOW_TITLE)
 
     def test_app_loads_saved_directory_and_output_preferences(self):
@@ -967,6 +1028,8 @@ class WindowLayoutTests(unittest.TestCase):
                 "selected_languages": ["ja", "ko"],
                 "overwrite_policy": "skip",
                 "max_concurrent": 2,
+                "output_width": 1920,
+                "output_height": 1080,
             }
         )
 
@@ -979,6 +1042,8 @@ class WindowLayoutTests(unittest.TestCase):
             self.assertEqual(app.output_format.get(), "webp")
             self.assertEqual(app.overwrite_policy.get(), "skip")
             self.assertEqual(app.max_concurrent.get(), "2")
+            self.assertEqual(app.output_width.get(), "1920")
+            self.assertEqual(app.output_height.get(), "1080")
             self.assertEqual(app.selected_codes(), ["ja", "ko"])
         finally:
             app.root.destroy()
@@ -1141,6 +1206,10 @@ class DirectorySelectionTests(unittest.TestCase):
                 str(output_dir),
                 "--output-format",
                 "webp",
+                "--output-width",
+                "1920",
+                "--output-height",
+                "1080",
             ]
 
             with patch.object(sys, "argv", argv):
@@ -1153,6 +1222,8 @@ class DirectorySelectionTests(unittest.TestCase):
             self.assertEqual(captured["source_dir"], source_dir)
             self.assertEqual(captured["output_dir"], output_dir)
             self.assertEqual(captured["settings"]["output_format"], "webp")
+            self.assertEqual(captured["settings"]["output_width"], 1920)
+            self.assertEqual(captured["settings"]["output_height"], 1080)
 
     def test_run_translation_uses_selected_output_extension(self):
         seen_output_paths = []

@@ -32,7 +32,11 @@ MAX_CONCURRENT_LIMIT = 16
 TRANSLATE_MAX_ATTEMPTS = 3
 RETRY_BASE_DELAY_SECONDS = 1.0
 RATE_LIMIT_RETRY_DELAY_SECONDS = 3.0
-OUTPUT_SIZE = "1080x1080"
+DEFAULT_OUTPUT_WIDTH = 1080
+DEFAULT_OUTPUT_HEIGHT = 1080
+MIN_OUTPUT_DIMENSION = 64
+MAX_OUTPUT_DIMENSION = 8192
+OUTPUT_SIZE = f"{DEFAULT_OUTPUT_WIDTH}x{DEFAULT_OUTPUT_HEIGHT}"
 DEFAULT_SELECTED_LANGUAGE_CODES = ("en",)
 CANCELLED_EXIT_CODE = 2
 
@@ -88,6 +92,8 @@ SETTING_KEYS = (
     "selected_languages",
     "overwrite_policy",
     "max_concurrent",
+    "output_width",
+    "output_height",
 )
 
 
@@ -104,6 +110,8 @@ def default_settings() -> dict:
         "selected_languages": list(DEFAULT_SELECTED_LANGUAGE_CODES),
         "overwrite_policy": DEFAULT_OVERWRITE_POLICY,
         "max_concurrent": MAX_CONCURRENT,
+        "output_width": DEFAULT_OUTPUT_WIDTH,
+        "output_height": DEFAULT_OUTPUT_HEIGHT,
     }
 
 
@@ -123,6 +131,14 @@ def normalize_max_concurrent(value=None) -> int:
     except (TypeError, ValueError):
         count = MAX_CONCURRENT
     return max(1, min(count, MAX_CONCURRENT_LIMIT))
+
+
+def normalize_output_dimension(value=None, default=DEFAULT_OUTPUT_WIDTH) -> int:
+    try:
+        dimension = int(str(value if value not in (None, "") else default).strip())
+    except (TypeError, ValueError):
+        dimension = default
+    return max(MIN_OUTPUT_DIMENSION, min(dimension, MAX_OUTPUT_DIMENSION))
 
 
 def normalize_selected_languages(value) -> list:
@@ -203,6 +219,14 @@ def normalize_settings(raw_settings=None) -> dict:
         settings.get("overwrite_policy", "")
     )
     settings["max_concurrent"] = normalize_max_concurrent(settings.get("max_concurrent"))
+    settings["output_width"] = normalize_output_dimension(
+        settings.get("output_width"),
+        DEFAULT_OUTPUT_WIDTH,
+    )
+    settings["output_height"] = normalize_output_dimension(
+        settings.get("output_height"),
+        DEFAULT_OUTPUT_HEIGHT,
+    )
     return settings
 
 
@@ -524,6 +548,18 @@ LANGUAGE_SPECS = {
     "zh_hant": make_language_spec("繁体中文", "繁体中文（台湾/香港使用的繁体字）"),
 }
 
+def output_size_label(settings: dict) -> str:
+    cleaned = normalize_settings(settings)
+    return f"{cleaned['output_width']}x{cleaned['output_height']}"
+
+
+def prompt_with_output_size(lang_config: dict, size_label: str) -> str:
+    prompt = str(lang_config.get("prompt", ""))
+    if OUTPUT_SIZE in prompt:
+        return prompt.replace(OUTPUT_SIZE, size_label)
+    return f"{prompt}请生成翻译后的图片，输出尺寸为 {size_label} 像素。"
+
+
 FOUR_LANGUAGE_CODES = ("en", "ko", "th", "vi")
 ALL_LANGUAGE_CODES = tuple(LANGUAGE_SPECS.keys())
 
@@ -546,6 +582,8 @@ def parse_args():
         default=DEFAULT_OVERWRITE_POLICY,
     )
     parser.add_argument("--max-concurrent", default="")
+    parser.add_argument("--output-width", default="")
+    parser.add_argument("--output-height", default="")
     parser.add_argument("--api-url", default="")
     parser.add_argument("--api-key", default="")
     parser.add_argument("--model-id", default="")
@@ -875,13 +913,14 @@ def _translate_image_once(
     output_format = normalize_output_format(raw_settings.get("output_format", ""))
     request_url = derive_chat_completions_url(runtime_settings["api_url"])
     openers = build_openers(runtime_settings["proxy_url"])
+    prompt = prompt_with_output_size(lang_config, output_size_label(runtime_settings))
     last_error = "Unknown error"
 
     for opener, route_name in openers:
         try:
             data = build_payload(
                 image_path,
-                lang_config["prompt"],
+                prompt,
                 runtime_settings["model_id"],
             )
             request = urllib.request.Request(
@@ -1019,6 +1058,7 @@ def run_translation(
     logger(f"输出格式: {output_format_label(output_format)}")
     logger(f"语言范围: {describe_languages(codes)}")
     logger("=" * 60)
+    logger(f"输出尺寸: {output_size_label(runtime_settings)}")
 
     setting_errors = validate_settings(runtime_settings)
     if setting_errors:
@@ -1258,6 +1298,16 @@ def main() -> int:
     settings["overwrite_policy"] = normalize_overwrite_policy(args.overwrite_policy)
     if args.max_concurrent.strip():
         settings["max_concurrent"] = normalize_max_concurrent(args.max_concurrent)
+    if args.output_width.strip():
+        settings["output_width"] = normalize_output_dimension(
+            args.output_width,
+            DEFAULT_OUTPUT_WIDTH,
+        )
+    if args.output_height.strip():
+        settings["output_height"] = normalize_output_dimension(
+            args.output_height,
+            DEFAULT_OUTPUT_HEIGHT,
+        )
 
     return run_translation(
         codes,
